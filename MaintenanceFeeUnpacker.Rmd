@@ -1,0 +1,223 @@
+---
+title: "maintenence fee extraction"
+output: html_document
+---
+https://www.google.com/googlebooks/uspto-patents-maintenance-fees.html
+
+```{r importblock, echo = F, message = F}
+require(lattice)
+require(igraph)
+require(dplyr)
+```
+```{r openFiles}
+## load, clean maintenance fees file
+# maintFees <- read.delim('//STORAGE/WagamanLab/SK Research Project/Data/MaintFeeEvents_20150316.txt', sep = ' ',
+#                        header = F, colClasses = "character" )
+maintFees <- read.delim('./Raw Data/MaintFeeEvents_20150316.txt',
+                        sep = ' ',
+                        header = F,
+                        colClasses = "character",
+                        stringsAsFactors = F)
+names(maintFees) <-  c("patNum", "appNum", "isSmallEntity", "appDate",
+                     "grantDate", "eventEntryDate", "eventCode")
+maintFees <- maintFees[,-c(2,8)] # removing appNum, appDate, empty column.
+
+## load the cleantech neighborhood citation network c10
+# load("//storage/WagamanLab/SK Research Project/Data/cleanNeighborhoodCitationNetwork.rdata")
+load('./ProcessedData/c10.Rdata')
+# c10
+# IGRAPH DN-- 144952 804985 -- 
+# + attr: name (v/c), title (v/n), clean.type (v/c), assignee (v/c)
+```
+```{r selectPatents}
+## get the patent numbers of interest from the citation network
+patNums <- V(c10)$name 
+## reduce the maintenance fees to those of interest
+rowsOfInterest <- maintFees[,1] %in% patNums
+maintFees <- maintFees[rowsOfInterest,] 
+```
+```{r codeDefinitions}
+# Here I create vectors of code definitions.
+
+# These codes indicate fee payments
+feePayCodes4 <- c(
+  "M1551",	#Payment of Maintenance Fee, 4th Year, Large Entity
+  'M170',	#Payment of Maintenance Fee, 4th Year, PL 96-517
+  'M173',	#Payment of Maintenance Fee, 4th Year, PL 97-247
+  'M183',	#Payment of Maintenance Fee, 4th Year, Large Entity
+  'M2551',	#Payment of Maintenance Fee, 4th Yr, Small Entity
+  'M273',	#Payment of Maintenance Fee, 4th Yr, Small Entity, PL 97-247
+  'M283',	#	Payment of Maintenance Fee, 4th Yr, Small Entity
+  'M695',	#	Payment of Maintenance Fee under 1.28(c)
+  'M1559'	#Payment of Maintenance Fee under 1.28(c)
+  )
+feePayCodes8 <- c(
+  'M1552',  #Payment of Maintenance Fee, 8th Year, Large Entity
+  'M171',	#Payment of Maintenance Fee, 8th Year, PL 96-517
+  'M174',	#Payment of Maintenance Fee, 8th Year, PL 97-247
+  'M184', #	Payment of Maintenance Fee, 8th Year, Large Entity
+  'M2552',	#Payment of Maintenance Fee, 8th Yr, Small Entity
+  'M274',	#Payment of Maintenance Fee, 8th Yr, Small Entity, PL 97-247
+  'M284'	#	Payment of Maintenance Fee, 8th Yr, Small Entity
+ )
+feePayCodes12 <- c(  
+  'M1553',	#Payment of Maintenance Fee, 12th Year, Large Entity
+  'M172',	#Payment of Maintenance Fee, 12th Year, PL 96-517
+  'M175',	#Payment of Maintenance Fee, 12th Year, 
+  'M2553',	#Payment of Maintenance Fee, 12th Yr, Small Entity
+  'M275',	#Payment of Maintenance Fee,12th Yr, Small Entity, PL 97-247
+  'M285',	#	Payment of Maintenance Fee, 12th Yr, Small Entity
+  'M185'	#Payment of Maintenance Fee, 12th Year, Large Entity
+)
+feePayCodes <- c(feePayCodes12, feePayCodes8, feePayCodes4)
+
+# Each of these codes indicates that the assignee was late with a fee payment, indicating 
+# some degree of neglect for the patent
+lateFeePaymentCodes <- c(
+  'M1554',	#	Surcharge for Late Payment, Large Entity
+  'M155',	#5	7.5 yr surcharge - late pmt w/in 6 mo, Large Entity.
+  'M1556',	#	11.5 yr surcharge- late pmt w/in 6 mo, Large Entity.
+  'M177',	#	Surcharge for Late Payment, PL 97-247
+  'M2554',	#	Surcharge for late Payment, Small Entity
+  'M2555',	#	7.5 yr surcharge - late pmt w/in 6 mo, Small Entity
+  'M2556',	#	11.5 yr surcharge- late pmt w/in 6 mo, Small Entity
+  'M286',	#	Surcharge for late Payment, Small Entity
+  'M277',	#Surcharge for Late Payment, Small Entity, PL 97-247
+  'M281',	#7.5 yr surcharge - late pmt w/in 6 mo, Small Entity
+  'M282',	#1.5 yr surcharge- late pmt w/in 6 mo, Small Entity
+  'M286'	#	Surcharge for late Payment, Small Entity
+)
+
+# These codes indicate the change of the patent holder or their small entity status
+statusChangeCodes <- c(
+  'LSM1',	#	Pat Hldr no Longer Claims Small Ent Stat as Indiv Inventor.
+  'LSM2',	#	Pat Hldr no Longer Claims Small Ent Stat as Small Business.
+  'LSM3',	#	 Pat Hldr no Longer Claims Small Ent Stat as Nonprofit Org
+  'LTOS'	#	Pat Holder Claims Small Entity Status
+)
+
+# These codes indicate companies attempting to revive 'zombie patents', endangering those who may have already pounced
+# on the newly free IP
+zombCodes <- c(
+  'M178',	#	Surcharge, Petition to Accept Payment After Expiration
+  'EXPX')	#	Patent Reinstated After Maintenance Fee Payment Confirmed
+
+# this code indicated expiration
+'EXP.'
+```
+
+```{r getPatentStats}
+## here I construct logical vectors indicating whether fees were paid, payments were late, a patent was resurrected, or an assignee changed entity status from small to something else.  I also construct a variable connoting the duration 
+## create logical vectors identifying legal events
+maintFees$isFeePayment4 <- maintFees$eventCode %in% feePayCodes4
+maintFees$isFeePayment8 <- maintFees$eventCode %in% feePayCodes8
+maintFees$isFeePayment12 <- maintFees$eventCode %in% feePayCodes12
+maintFees$isFeePayment <- maintFees$eventCode %in% feePayCodes
+maintFees$isLatePayment <- maintFees$eventCode %in% lateFeePaymentCodes
+maintFees$isStatusChange <- maintFees$eventCode %in% statusChangeCodes
+maintFees$isZomb <- maintFees$eventCode %in% zombCodes
+maintFees$isExp <- maintFees$eventCode == 'EXP.' # Not sure, but I think 
+# isExp only identifies expiration within a patent term
+## create a numeric vector of differences from the date of fee payment events and the patent grant date.  Maintenance fees are due in the 3rd-4th, 7th-8th, and 11th-12th years after the patent grant. NA if not a maintenance fee event.
+maintFees$timeDiff[maintFees$isFeePayment] <- as.integer(substr(
+  maintFees$eventEntryDate[maintFees$isFeePayment], 1, 4)) -
+  as.integer(substr(maintFees$grantDate[maintFees$isFeePayment], 1, 4))
+## Creates a numeric vector of the number of years ago the patent application was. Patent terms are 20 years from the application date.
+maintFees$yearsAgo <- 2010 - as.integer(substr(
+  maintFees$appDate, 1, 4))
+## separates legal events in the period of study (2010 inclusive) from those after it. The maintFees dataframe is filtered down to the 'past' dataframe. It is worth noting the 'future' dataframe can easily be created as a ground-truth dataset to test predictions on who will maintain which patents. 
+isPast <- as.integer(substr(maintFees$eventEntryDate, 1, 4)) < 2011
+isFuture <- !isPast
+past <- maintFees[isPast,]
+# future <- maintFees[isFuture,]
+
+## merge rows describing the same patent, creating a new dataframe patStats with the following variables :
+# appYear         : year of application (int)
+# yearsSinceApp   : years between application and 2010 (int)
+# yearsSinceGrant : years between grant and 2010 (int)
+# numFeesPaid     : number of unique maintenance fees paid (int)
+# expired         : whether the patent expired due term ending or nonpayment of fees
+# fp4             : was the 4th-year fee paid (log)
+# fp8             : was the 8th year fee paid (log)
+# fp12            : was the 12th year fee paid (log)
+# letDrop         : whether the patent was allowed to lapse due to nonpayment of maintenance fees 
+# numLateFees     : number of fees paid late. 
+# zombCounts      : number of times the patent was ressurected after expiration 
+# statusChange    : how many times the patent assignee changed entity status
+ 
+byPatNum <- group_by(past, patNum)
+patStats <- summarise(byPatNum, 
+                      appYear = as.integer(substr(max(appDate),1,4)),
+                      yearsSinceApp = max(yearsAgo),
+                      yearsSinceGrant = max(as.integer(substr(grantDate,
+                                                              1,4))),
+                      numFeesPaid = sum(unique(eventCode) %in%
+                                          feePayCodes),
+                      expired = any(isExp) & max(yearsAgo) > 20,
+                      fp4 = any(isFeePayment4),
+                      fp8 = any(isFeePayment8),
+                      fp12 = any(isFeePayment12),
+                      # some patents are young and haven't had a chance
+                      # to pay all their fees.  This conditional
+                      # statement controls for that.  
+                      # I'm being generous and leaving an extra year for 
+                      # fee payments here. 
+                      letDrop =  if(14 <= yearsSinceApp){
+                        (!fp12|!fp8|!fp4)
+                      }else if ( 9 <= yearsSinceApp){
+                        (!fp8|!fp4)
+                      }else if (5 <= yearsSinceApp){
+                        !fp4
+                      },
+                      numLateFees = sum(isLatePayment),
+                      zombCounts = sum(isZomb),
+                      statusChange = sum(isStatusChange),
+                      yearsSinceGrant = max(yearsAgo)
+                      )
+```
+
+```{r explore protection}
+## visualizes trends in protection of patents
+mat <- matrix(nrow = 2, ncol = 2, 
+              dimnames = list(row = c("pre-1990", "post-1990"),
+                              col = c("let lapse", "maintained")))
+
+mat["pre-1990","let lapse"] <- length(which(
+  patStats$appYear < 1990 & patStats$letDrop))
+mat["pre-1990","maintained"] <-  length(which(
+  patStats$appYear < 1990 & !patStats$letDrop))
+mat["post-1990","let lapse"] <- length(which(
+  patStats$appYear >= 1990 & patStats$letDrop))
+mat["post-1990","maintained"] <- length(which(
+  patStats$appYear >= 1990 & !patStats$letDrop))
+barplot(t(mat), 
+  legend = colnames(mat)
+  )
+print(as.data.frame(mat))
+## most patents post-1990 haven't come to their later mainenance fees, but still the proportion of protected to nonprotected patents is similar, though the number of patents and current protected patents is significant and growing.
+## there are a handful of patents the above program misclassifies. For example, some patents do not record one or more of their fee payments, but then record a subsequent fee payment.  These are mostly reissue patents, which are the same as normal patents but with increased claims. I do not see the harm in leaving so few patents out:
+patStats[which(patStats$fp8 & !patStats$fp4),c(1,7,8,9)]
+patStats[which(patStats$fp12 & !patStats$fp8),c(1,7,8,9)]
+```
+```{r saveStuff}
+## make vectors of protected patents from all time and currently protected patents 
+protectedPats <- patStats$patNum[!patStats$letDrop]
+currentPats <- patStats$patNum[!patStats$letDrop &
+                                patStats$appYear >= 1990
+                               ]
+## explore the resultant citation networks for a moment
+vids <- which(patNums %in% protectedPats)
+p10 <- induced.subgraph(c10, vids)
+## IGRAPH DN-- 44007 116345 -- 
+print(paste('% in giant component:',
+            as.character(max(clusters(p10)$csize)/vcount(p10))))
+vids <- which(patNums %in% currentPats)
+m10 <- induced.subgraph(c10, vids)
+## IGRAPH DN-- 38409 93967 -- 
+print(paste('% in giant component:',
+            as.character(max(clusters(m10)$csize)/vcount(m10))))
+
+## save the remaining files 
+save(protectedPats, file = './ProcessedData/protectedPats.rdata')
+save(currentPats, file = "./ProcessedData/currentPats.rdata")
+```

@@ -1,0 +1,884 @@
+---
+title: "explore the clean dataset"
+output: html_document
+---
+
+```{r importblock, echo=TRUE, message=FALSE}
+require(igraph)
+require(dplyr)
+require(lattice)
+library(hexbin)
+library(RColorBrewer)
+```
+First, not described, load igraph objects containing the neighborhoods of renewable energy technologies, then the same neighborhoods with only protected patents and current patents(see MaintenanceFeeUnpacker.rmd for details).
+```{r loadingBlock, cache = TRUE, message=FALSE, echo=FALSE}
+load("./ProcessedData/cleanNeighborhoodCitationNetwork.rdata",
+     verbose = T)
+# IGRAPH DN-- 144952 804985 -- 
+# + attr: name (v/c), title (v/n), clean.type (v/c)
+
+cleantech.patents <- read.delim("./Raw Data/cleantechPatents")
+names(cleantech.patents) <- c("patent.number",
+                              "assignee.name", 
+                              "assignee.type",
+                              "patent.title", 
+                              "clean.type")
+
+# get patent assignment data
+assignees <- read.delim("./Raw Data/assignee2.tsv", 
+                        row.names = 1, 
+                        stringsAsFactors = F)
+load('./ProcessedData/protectedPats.rdata')
+load('./ProcessedData/currentPats.rdata')
+cases <- read.csv('./ProcessedData/litigatedCleantechPatents.csv',
+                  header=F) # a vector of litigated patents
+cases <- cases[,1]
+V(c10)$assignee <- assignees$Assignee[match(V(c10)$name, assignees$Patent)]
+```
+```{r getGreenTypes, cache=T}
+# create separate graphs for the neighborhood of each renewable energy type, 
+# protected patents of each type's neighborhood, and protected patents in the
+# cleantech neighborhood.
+
+getGreenTypes <- function(g, t){
+  # retuns a vector of vertex ids of patents of a type t
+  # 
+  # Args:
+  # g: an igraph object with "clean.type" node attributes
+  # t: a string in c("Solar", "Wind", "Nuclear", "Geothermal",
+  #                  "Hydro", "Biofuel", "x")
+  return(which(V(g)$clean.type == t))
+}
+
+s <- getGreenTypes(c10, "Solar")
+w <- getGreenTypes(c10, "Wind")
+n <- getGreenTypes(c10, "Nuclear")
+g <- getGreenTypes(c10, "Geothermal")
+h <- getGreenTypes(c10, "Hydro")
+b <- getGreenTypes(c10, "Biofuel")
+x <- getGreenTypes(c10, "x")
+```
+```{r getNeighborhoods, cache = TRUE, echo=FALSE}
+# this chunk creates citation network graph objects from the patents citing and cited by each type of RET.
+keys <- c("b", "g", "h", "n", "s", "w", "x")
+types <- list()
+types['b'] <- "bio"
+types['g'] <- "geo"
+types['h'] <- "hydro"
+types['n'] <- "nuke"
+types['s'] <- "solar"
+types['w'] <- "wind"
+
+for (k in keys){
+  # this loop creates igraph objects describing each
+  ns <- get(k) # gets vertex id of cleantech patents
+  designation <- paste(k, "Neighborhood", sep = '')
+  assign(designation, 
+         unique(unlist(neighborhood(c10,
+                                    order = 1,
+                                    nodes = ns,
+                                    mode = "all")
+                       )
+                )
+  )
+  designation2 <- paste(types[k], "Graph", sep = '')
+  gr <- induced.subgraph(c10, get(designation))
+  assign(designation2, gr)
+  designation3 <-  paste(types[k], "Pro", sep = '')
+  gPro <- induced.subgraph(gr, which(V(gr)$name %in% protectedPats))
+  assign(designation3, gPro)
+  designation4 <-  paste(types[k], "Current", sep = '')
+  gCurrent <- induced.subgraph(gr, which(V(gr)$name %in% protectedPats))
+  assign(designation4, gCurrent)
+}
+# these are almost all of the existing patents, ballparking 80-95% of each group from the cleantech.patents dataset.
+# here are the overall citation networks of protected patents (p10) and current patents (m10)
+p10 <- induced.subgraph(c10, which(V(c10)$name %in% protectedPats))
+m10 <- induced.subgraph(c10, which(V(c10)$name %in% currentPats))
+print("number of green patents by the above types:")
+for (i in list(s,w,n,g,h,b,x)){
+  print(length(i))
+}
+```
+```{r toCorpNet, cache = TRUE}
+# This chunk creates graph objects of networks of citations between assignees' patent portfolios
+
+# create the graphs by operation on the protected patent networks' edgelists
+graphs <- list("p10","m10",
+               "solarPro","nukePro","windPro","hydroPro","bioPro",
+               "geoPro",
+               "solarCurrent", "nukeCurrent","windCurrent", "bioCurrent",
+               "hydroCurrent", "geoCurrent"
+)
+for (i in graphs){
+  g <- get(i) # gets the named igraph object as the temporary variable g
+  e <- get.edgelist(g) # get the edgelist of g
+  # swaps patent numbers for assignees in the edgelist
+  e[,1] <- assignees$Assignee[match(e[,1], assignees$Patent)] 
+  e[,2] <- assignees$Assignee[match(e[,2], assignees$Patent)]
+  # making sure all empty cells, '', are filled with NAs 
+  e[which(e[,2] ==''),2] <- NA
+  # make e a data frame with columns "Source", "Target", "weight"
+  e <- as.data.frame(e, stringsAsFactors = F)
+  # create a dummy weight variable in column 3, weighting each edge by 1
+  e[,3] <- 1
+  names(e) <- c("Source", "Target", "weight0")
+  # count how many total patents each assignee cites
+  totalOutCitations <-summarize(group_by(e, Source), s = sum(weight0))
+  # count how many cleantech patents each assignee holds
+  cleanHoldings <- summarise(
+    group_by(get.data.frame(g, what="vertices"), assignee),
+    cleanHoldings = sum(clean.type != 'x')
+    )
+  # remove unassigned patents/insigniicant assignees
+  e2 <- summarize(group_by(na.omit(e), Source, Target),
+                  weight = sum(weight0))
+  # make a graph caled [i]Corps with edge weights normalized by the number of citations between each company
+  g2 <- graph.data.frame(na.omit(e2))
+  # read in the number of citations each entity makes
+  m <- match(totalOutCitations$Source, V(g2)$name)
+  V(g2)[na.omit(m)]$totalCitations <- totalOutCitations[
+    totalOutCitations$Source %in% V(g2)$name,]$s
+  # find the number of times a company cites its own portfolio
+  V(g2)$selfCites <- diag(as.matrix(get.adjacency(g2, attr = "weight")))
+  # find the fraction of citations made that are to a company's own
+  # portfolio
+  V(g2)$fracSelfCites <-  V(g2)$selfCites %*%
+    diag(1/(V(g2)$totalCitations))
+  # read in the number of cleantech patents each company has
+  V(g2)$cleanHoldings <- cleanHoldings$cleanHoldings[
+    match(V(g2)$name, cleanHoldings$assignee)]
+  # read in the number of holdings each company has
+  holdings <- table(V(g)$assignee)
+  V(g2)$holdings <- holdings[match(V(g2)$name, names(holdings))]
+  assign(paste(i,"Corps", sep = ''), g2) 
+  }
+```
+```{r Conductance, cache = TRUE}
+Conductance <- function(g, commsVec){
+  # find the ratio of links between within communities to the total
+  # number of edges in the graph, also known as the conductance of the 
+  # communities.  Tthis isn't the strict definition of conductance, but
+  # the ratio of edges within to edges without remains useful as a
+  # concept.
+  # 
+  # Args: 
+  # g: a directed, weighted igraph object
+  # commsVec: a membership vector of a community object
+  
+  e <- get.edgelist(g, names = F)
+  e[,1] <- commsVec[e[,1]]
+  e[,2] <- commsVec[e[,2]]
+  if (is.weighted(g)){
+     withinCommunities <- sum((e[,1] == e[,2]) * E(g)$weight)
+     # the weighted number of edges within communities 
+     allEdges <- sum(E(g)$weight)
+     # the sum of the weights of the edges
+  }else{
+    withinCommunities <- sum(e[,1] == e[,2]) 
+    allEdges <- ecount(g)
+    # the number of edges within the communities
+  }
+  
+  return(withinCommunities/allEdges)
+}
+```
+```{r FindCorpCommunities, echo=FALSE}
+FindCorpComms <- function(g){
+  # returns an igraph community object from a weighted inter-corporate citation network
+  # 
+  # args:
+  # g: a directed network of citations from companies' patents to other companies' patents
+  
+  # create an undirected graph from the weighted corporate networks, summing the edge weights
+  ug <- as.undirected(g)
+  comms <- label.propagation.community(ug, weights = E(ug)$weight)
+  print(paste("Modularity:", comms$modularity))
+  print(paste("edges within / edges without communities:",
+              Conductance(ug, comms$membership)))
+  return(comms)
+}
+```
+```{r companyHoldingsFunction, echo=FALSE, cache = TRUE}
+# explore the overall partition of patents between identified companies
+ExploreCompanyHoldings <- function(g){
+  # makes a dataframe of companies and the number of patents they hold, then
+  # plots a histogram of the number of patents/assignee and a barchart
+  # of what fraction of companies have more than n patents
+  # 
+  # Args: 
+  # g: igraph object citation network
+  
+  # get company holdings frequency 
+  companyHoldings <- as.data.frame(
+    table(assignees$Assignee[match(V(g)$name, assignees$Patent)])
+  )
+  names(companyHoldings) <- c("assignee", "numberOfPatents")
+  # remove company ''
+  companyHoldings <- companyHoldings[-1,]
+  
+  # plot a histogram of the number of patents companies hold
+  plot(histogram(log10(companyHoldings$numberOfPatents),
+                 xlab = "log10(# of patents owned)",
+                 ylab = "% of assignees",
+                 main = "Number of patents per assignee"))
+  
+  # make a vector of how many companies have more than n patents
+  tempNumberOfCorpsLeft <- c()
+  for (i in c(1:20)){
+    # print(i)
+    hasMoreThanNPatents <- length(which(
+      companyHoldings$numberOfPatents > i))
+    fracLeft <- hasMoreThanNPatents/dim(companyHoldings)[1]
+#     print(hasMoreThanNPatents)
+#     print(fracLeft)
+    tempNumberOfCorpsLeft <- c(tempNumberOfCorpsLeft, fracLeft)
+  }
+  
+  # plot a barchart of the fraction of companies holding more than n patents
+  barplot(tempNumberOfCorpsLeft, 
+               names.arg = c(1:20),
+               xlab = "Number of patents",
+               ylab = "fraction of companies",
+               main = "Number of Companies Owning More than X Patents")
+  # this would be the place to print out the top 20 for each graph
+  # or the fraction owned by the top 20
+} #
+```
+```{r compareCompanyHoldings, echo=FALSE, cache = TRUE}
+CompareCompanyHoldings <- function(g1, g2, s){
+  # plots a histogram of a 20-item vector of the differences of fractions
+  # of companies holding more than n patents and another of the numbers more 
+  # 
+  # Args:
+  # g1, g2: two igraph citation networks to be compared
+  # s: string to be apended to the barplot title
+  
+  # get company holdings frequency 
+  companyHoldings1 <- as.data.frame(
+    table(assignees$Assignee[match(V(g1)$name, assignees$Patent)])
+  )
+  companyHoldings2 <- as.data.frame(
+    table(assignees$Assignee[match(V(g2)$name, assignees$Patent)])
+  )
+  
+  # remove company ''
+  companyHoldings1 <- companyHoldings1[-1,]
+  companyHoldings2 <- companyHoldings2[-1,]
+  
+  # generate the vectors of fractions of companies holding more than n patents
+  tempNumberOfCorpsLeft1 <- c()
+  tempNumberOfCorpsLeft2 <- c()
+  for (i in c(1:20)){
+    #print(i)
+    hasMoreThanNPatents1 <- length(which(companyHoldings1$Freq > i))
+    hasMoreThanNPatents2 <- length(which(companyHoldings2$Freq > i))
+    fracLeft1 <- hasMoreThanNPatents1/dim(companyHoldings1)[1]
+    fracLeft2 <- hasMoreThanNPatents2/dim(companyHoldings2)[1]
+    #print(hasMoreThanNPatents)
+    #print(fracLeft)
+    tempNumberOfCorpsLeft1 <- c(tempNumberOfCorpsLeft1, fracLeft1)
+    tempNumberOfCorpsLeft2 <- c(tempNumberOfCorpsLeft2, fracLeft2)
+  }
+  diffs <- tempNumberOfCorpsLeft1 - tempNumberOfCorpsLeft2
+  barplot(diffs, 
+          names.arg = c(1:20),
+          xlab = "Number of patents",
+          ylab = "fraction of companies",
+          main = paste(
+            "Difference in the Fraction of Companies Owning More than
+          X", s)
+  )
+}
+
+```
+```{r top20%, cache = TRUE, echo=FALSE}
+Top20OwnerFrac <- function(g){
+  # prints the fraction of patents owned by the top 20 companies 
+  # 
+  # Args:
+  # g: igraph object; a patent citation network 
+  
+  # get company holdings frequency 
+  companyHoldings <- as.data.frame(
+    table(assignees$Assignee[match(V(g)$name, assignees$Patent)])
+  )
+  
+  # remove company ''
+  companyHoldings <- companyHoldings[-1,]
+  
+  # print the fraction owned by the top 20 companies
+  return(sum(tail(sort(companyHoldings$Freq), 20))/vcount(g))
+}
+
+PrintTop20 <-function(g){
+  # prints the the top 20 companies owning patents
+  # 
+  # Args:
+  # g: igraph object; a patent citation network 
+  
+  # get company holdings frequency 
+  companyHoldings <- as.data.frame(
+    table(assignees$Assignee[match(V(g)$name, assignees$Patent)])
+  )
+  
+  # remove company ''
+  companyHoldings <- companyHoldings[-1,]
+  
+  #print the top 20 companies
+  print(companyHoldings[
+    order(companyHoldings$Freq, decreasing = T),][c(1:20),]
+  )
+}
+```
+```{r top20%Print, echo=FALSE, cache = TRUE}
+print("top 20 assignees of protected patents related to:")
+print("solar:")
+PrintTop20(solarPro)
+print("wind:")
+PrintTop20(windPro)
+print("geothermal power:")
+PrintTop20(geoPro)
+print("biofuels:")
+PrintTop20(bioPro)
+print("hydroelectric power:")
+PrintTop20(hydroPro)
+```
+```{r assignmentExploration2, cache = TRUE}
+ExploreCompanyHoldings(c10)
+CompareCompanyHoldings(c10, p10, "Unprotected vs Protected Cleantech Patents") 
+
+typePartitionDF <- data.frame(
+  matrix(vector(), 3, 0), 
+  row.names =  c('# assignees', 
+                 '# patents',
+                 '% owned by top 20 assignees')
+)
+
+# create subgraphs of the cleantech citation neighborhood networks of only protected patents, all of whose maintenance fees have been paid.  Old, expired patents are included if all of their fees have been paid since the technologies that cite them-- and all they cite-- still represent similarity to technologies the assignee decided to protect
+for (t in c("solar", "wind", "bio", "nuke", "geo", "hydro")){
+  for (suffixNumber in c(1,2)){
+    suffixes <- c("Graph","Pro")
+    suffix <- suffixes[suffixNumber]
+    graphName <- paste(t, suffix, sep = '')
+    g <- get(graphName)
+    colName <- paste(t,
+                     c("-related patents",
+                       "-related protected patents")[suffixNumber],
+                     sep = '')
+    typePartitionDF[colName] <- c(
+      length(unique(V(g)$assignee)), 
+      vcount(g),
+      Top20OwnerFrac(g))
+  }
+}
+print(typePartitionDF)
+```
+```{r interType, message=FALSE, echo=FALSE}
+# # how do patents of each RE type cite patents of other RE types?  This code takes the sets of nodes of each type, and 
+# # For each type i and for each type j takes the sum of the cells of the adjacency matrix a_ij in the
+# 
+# a <- get.adjacency(c10)
+# mat <- matrix(0, nrow = 7, ncol = 7)
+# colnames(mat) <- c(levels(as.factor(cleantech.patents$clean.type)), "x")
+# rownames(mat) <- colnames(mat)
+# 
+# for (i in c(1:7)){
+#   for (j in c(1:7)){
+#     I <- unlist(list(b,g,h,n,s,w,x)[i])
+#     J <- unlist(list(b,g,h,n,s,w,x)[j])
+#     mat[i,j] <- sum(a[I,J])
+#   }
+# }
+# 
+# mat
+# rm(a,b,h,g,n,s,w,x)
+```
+```{r comm verification, cache = TRUE}
+# make an undirected version of the graph-- this greatly speeds up community detection. I'm using p10 since is has half the number of nodes as c10, yet is nearly a supergraph of the other network graphs
+up10 <- as.undirected(p10)
+
+# test the performance of use label propogation or multilevel community algorithms 
+# initiate start with one community partitioning, then compare the resulting spread of modularities and number of produced communities
+biggestMod <- label.propagation.community(up10)
+mod <- c()
+nComms <- c()
+system.time(for (i in c(1:100)){
+  cTemp <- label.propagation.community(up10)
+  mod <- c(mod, cTemp$modularity)
+  nComms <- c(nComms, length(unique(cTemp$membership)))
+  if (cTemp$modularity > biggestMod$modularity){
+    biggestMod <- cTemp
+  }
+}
+)
+#   user  system elapsed 
+# 129.927   0.669 130.502 
+summary(nComms)
+summary(mod)
+```
+```{r commdetect, echo=FALSE, cache = TRUE}
+# this chunk identifies communities in the cleantech neighborhood graph and creates a dataframe, commsDF, to hold data about them.
+
+GetCommunityAttributes <- function(g, comms){
+  # gets a dataframe of community attributes
+  # 
+  # Args:
+  # g: the directed citation network whose communities are to be detected and analyzed
+  # comms: a community object for g
+  e <- get.edgelist(g, names = F)
+  e[,1] <- comms$membership[e[,1]]
+  e[,2] <- comms$membership[e[,2]]
+  
+  df <- get.data.frame(g, "vertices")
+  df$comm <- comms$membership
+  df$inDeg <- degree(g, mode = "in")
+  df$outDeg <- degree(g, mode = "out")
+  df$totalCit <- degree(g, mode = "total")
+  
+  commsDF <- summarise(group_by(df, comm), 
+                       num.corps = length(unique(assignee[
+                         nchar(unique(assignee) > 0)])),
+                       num.pats = length(name),
+                       num.cit.out = sum(outDeg),
+                       num.cit.in = sum(inDeg),
+                       num.cit = sum(totalCit),
+                       num.cleantech = sum(clean.type != 'x'),
+                       max.portfolio = if (
+                         length(
+                           na.omit(
+                             assignee[nchar(assignee) > 0]
+                           )
+                         ) > 0
+                       ){
+                         max(na.omit(as.vector(table(
+                           assignee[nchar(assignee) > 0]
+                         )
+                         )
+                         ))
+                       }else{1}
+  )
+  # Get the ratio of links within to links without each community
+  # 
+  temp <- c()
+  commsDF <- data.frame(commsDF)
+  for (x in commsDF$comm){
+    temp <- c(temp,
+              sum(e[,1] == x & e[,2] == x)/commsDF$num.cit[x]
+    )
+  }
+  commsDF$conductance <- temp[!is.infinite(temp)]
+  return(commsDF)
+  plot(histogram(log10(commsDF$num.pats),
+                 xlab = "log10(community size)")) 
+  plot(histogram(commsDF$conductance))
+}
+# length(which(is.na(commsDF$conductance))) == length(
+#   which(commsDF$num.cit ==0))
+# length(which(is.na(commsDF$conductance) & commsDF$num.cit ==0))
+# all isolates are in their own communities, so is.na(conductance) detects them.  They are also a solid majority of communities in all the unprotected graphs
+```
+```{r communitycomparisonF, cache = TRUE, echo=FALSE}
+rf <- colorRampPalette(rev(brewer.pal(11,'Spectral')))
+CommunityComparison <- function(commsDF, comms){
+  # Explores the makeup of the communities in a citation network
+  # 
+  # Args:
+  # commsDF: a dataframe containing all the attributes of the communities
+  # in g
+  # comms: 
+
+  # observe the cohesion of each community.  Communities containing nearly half their members links are easily interpretable as intuitive, strong partitions.
+  plot(hexbinplot(conductance ~ num.pats,
+                  data = commsDF,
+                  aspect = 1,
+                  ybnds = "panel",
+                  xbnds="panel",
+                  ylab = "fraction of citations in community",
+                  colramp = rf,
+                  main = "community size vs fraction of citations of
+                  members of a community by other members of the
+                  community by community counts"
+  ))
+  # look at the distribution of consolidation of communities that are 
+  # not isolated nodes
+  par(mfrow=c(2,2))
+  plot(hexbinplot(max.portfolio/num.pats ~ log10(num.pats),
+                  data = na.omit(commsDF),
+                  aspect = 1,
+                  ybnds = "panel",
+                  xbnds= "panel",
+                  colramp = rf,
+                  inv = exp,
+                  trans = log,
+                  ylab= "max share of patent community",
+                  main= "Consolidation vs size of non-isolated
+                  communities by community counts"))
+  
+  # create three other data.frames of community attributes weighted by 
+  # patent counts. Note: comms$membership maps patents to the rows in
+  # commsDF corresponding to the communities the patents belong to. 
+  # The first is of all patents 
+  by.patents <- commsDF[comms$membership,]
+  # observe the consolidation of communities 
+  plot(hexbinplot(max.portfolio/num.pats ~ log10(num.pats),
+                  data = na.omit(by.patents),
+                  aspect = 1,
+                  ybnds = "panel",
+                  xbnds= "panel",
+                  colramp = rf,
+                  inv = exp,
+                  trans = log,
+                  ylab= "max share of patent community",
+                  main= "Consolidation vs size of non-isolated
+                  communities by patent counts"))
+  # the second is all cleantech patents 
+  is.cleantech <- (V(g)$clean.type != 'x') 
+  cleantech.comms.by.patents <- commsDF[comms$membership[is.cleantech],]
+  # observe the consolidation of communities containing cleantech patents
+  plot(hexbinplot(max.portfolio/num.pats ~ log10(num.pats),
+                  data = cleantech.comms.by.patents,
+                  aspect = 1,
+                  ybnds = "panel",
+                  xbnds="panel",
+                  colramp = rf,
+                  ylab="max share of patent community",
+                  main = "Consolidation vs size of 
+                  communities by cleantech patent counts")) 
+  # the vector of litigated patent numbers was generated from running the
+  # litigation history of the patents in the cleantech.patents dataset in
+  # Lex Machina.
+  is.Litigated <- (V(g)$name %in% cases)
+  litigated.comms.by.cleantech.patents <-
+    commsDF[comms$membership[is.Litigated],]
+ 
+  # observe the consolidation of communities containing litigated 
+  # cleantech patents
+  plot(hexbinplot(max.portfolio/num.pats ~ log10(num.pats),
+                  data = litigated.comms.by.cleantech.patents,
+                  aspect = 1, 
+                  ybnds = "panel",
+                  xbnds="panel",
+                  colramp = rf,
+                  main = "Consolidation v. size of communities of
+                   litigated cleantech patents by patent count"))
+   print(paste(as.character(length(which(is.Litigated))),
+              "litigated communities containing cleantech patents in this citation network"))
+  # explore the numbers of corps, max share of communities with
+  # litigated cleantech patents
+  par(mfrow = c(1,2))
+  plot(hexbinplot(max.portfolio ~ num.corps,
+                  data = by.patents,
+                  aspect = 1,
+                  ybnds = "panel",
+                  xbnds="panel",
+                  colramp = rf,
+                  main = "Consolidation v. Number of Named 
+                  Assignees of communities by communities' patent count"))
+  plot(hexbinplot(max.portfolio ~ num.corps,
+                  data = litigated.comms.by.cleantech.patents,
+                  aspect = 1,
+                  ybnds = "panel",
+                  xbnds="panel",
+                  colramp = rf,
+                  main = "Consolidation v. Number of Named 
+                  Assignees of communities containing litigated patents
+                  by litigated patent count"))
+  # turns out most shares are small, with few named corps. 
+}
+
+u10 <- as.undirected(p10)
+c <- label.propagation.community(u10)
+print(paste("edges inside communities / all edges", 
+            Conductance(u10, c$membership)))
+commsDF <- GetCommunityAttributes(u10, c)
+```
+
+Comparisons between communities show there is no clear relationship between community consolidation, community size, and litigation.  
+```{r CommunityComparison, cache = TRUE, warning=FALSE}
+CommunityComparison(commsDF, comms=c)
+```
+```{r selfcite, cache = TRUE}
+# Compare the fractions of citations that are self-citations
+# that is citations within a company's patent portfolio
+selfCite <- c()
+for (i in c("windProCorps",
+            "solarProCorps",
+            "nukeProCorps",
+            "geoProCorps",
+            "bioProCorps",
+            "hydroProCorps")){
+  g <- get(i)
+  selfCite <- c(selfCite, sum(V(g)$selfCites)/sum(E(g)$weight))
+  print(i)
+  plot(histogram(na.omit(V(g)$fracSelfCites[V(g)$fracSelfCites > 0]),
+                 main = "Distribution of nonzero rates of self-citation",
+                 xlab = "fraction of citations within company
+                 portfolio"))
+}
+barplot(selfCite, names.arg = c("wind", "solar", "nuclear", "geothermal",
+                                "biofuel", "hydro"),
+        main = "fraction of citations within company portfolios in
+        each network")
+```
+```{r RuleOfThumbFragmentation, cache = TRUE}
+Frag <- function(gCorpsString){
+  # gets Ziedonis's fragmentation index for each company in the corporate   # network
+  gCorps <- get(gCorpsString)
+  outDeg <- graph.strength(gCorps, mode = "out") # vector of total
+                                                 # citations
+  frag <- c()
+  for (corp in V(gCorps)){
+    d <- outDeg[corp]
+    frag <- c(frag, 1 - (1/d^2)*sum((E(gCorps)[from(corp)]$weight)^2))
+    }
+  return(frag)
+}
+
+for (gCorpsString in c("solarProCorps", "nukeProCorps", "windProCorps",
+                       "hydroProCorps", "bioProCorps", "geoProCorps",
+                       "solarCurrentCorps", "nukeCurrentCorps",
+                       "windCurrentCorps", "bioCurrentCorps",
+                       "hydroCurrentCorps","geoCurrentCorps")){
+  g <- get(gCorpsString)
+  V(g)$frag <- Frag(gCorpsString)
+  assign(gCorpsString, g)
+}
+
+CommunityFragmentation <- function(gCorps, comms){
+  # find the communities of corporations with the most fragmented
+  # citations
+  # 
+  # Args:
+  # gCorps: a directed netowrk of citations between corporate portfolios
+  # comms: an igraph community object produced from 
+  # label.propagation.community(as.undirected(gCorps))
+  
+  df <- get.data.frame(gCorps, what = "vertices")
+  df$comm <- comms$membership
+  corpCommsDF <- summarise(group_by(df, comm),
+                           num.corps = length(unique(name)),
+                           num.pats = sum(holdings),
+                           num.clean.pats = sum(cleanHoldings),
+                           avg.frag = mean(frag[!is.na(frag)]))
+  return(corpCommsDF)
+}
+
+for (gCorpsString in c("solarCurrentCorps", "nukeCurrentCorps",
+                       "windCurrentCorps", "bioCurrentCorps",
+                       "hydroCurrentCorps","geoCurrentCorps")){
+  print(gCorpsString)
+  g <- get(gCorpsString)
+  comms <- label.propagation.community(as.undirected(g))
+  corpCommsDF <- CommunityFragmentation(g, comms)
+  ofWorry <- corpCommsDF[corpCommsDF$avg.frag > .5,]
+  print(paste(as.character(nrow(ofWorry)),
+              "corporate communities of worry detected containing",
+              as.character(sum(ofWorry$num.clean.pats)),
+              "renewable energy patents"))
+  print(summary(ofWorry))
+}
+```
+
+```{r visualizeCorpFragmentation}
+# plot the fragmentation indexes vs. portfolio size of companies citing themselves at least once and holding at least 1 cleantech patent
+for (i in c("solarCurrentCorps", "nukeCurrentCorps",
+            "windCurrentCorps", "bioCurrentCorps",
+            "hydroCurrentCorps","geoCurrentCorps")){
+  g <- get(i)
+  x <- get.data.frame(g, "vertices")
+  print(i)
+  plot(hexbinplot( frag ~ log10(holdings), data = x[
+    (x$cleanHoldings >= 1 & x$selfCites >= 1),],  colramp = rf,
+                   inv = exp,
+                   trans = log,
+                   main = "Assignee fragmentation index vs. size of current patent", 
+                   aspect = .5))
+  
+  
+}
+```
+```{r componentcomparison, cache = TRUE, message=FALSE, echo=FALSE, include=FALSE}
+# 
+# # gets basic statistics on the overall citation graph such
+# weak.comps.c10 <- clusters(c10, mode = "weak")
+# gc <- induced.subgraph(c10, 
+#                        which(weak.comps.c10$membership == 1))
+# gc
+# # IGRAPH DN-- 141718 802282 -- 
+# # + attr: name (v/c), title (v/c), clean.type (v/c), assignee (v/n),
+# # | citation.date (e/c), category (e/c)
+# eig <- evcent(gc)
+# plot(histogram(log10(eig$vector),
+#                main = "Eigenvector Centrality of the 
+#                Giant Component of the
+#                Cleantech neighborhood",
+#                xlab = "log10(eigenvector centrality)"))
+# deg <- degree(gc, mode = "all")
+# histogram(log10(deg), main = "Order of degree")
+# length(which(deg == 1)) # 53107, 0.635 of the giant component
+# indeg <- degree(gc, mode = "in")
+# length(which(indeg == 0)) # 30129, 0.2125983 of the giant component are never cited
+# outdeg <- degree(gc, mode = "out")
+# length(which(outdeg == 0)) # 85799,  0.6054206 of the giant component cite nothing
+# length(which(indeg == 1)) # 41802, 0.2949661 of the giant component
+# # ergo 0.2949661 of the gc are once-cited works 
+```
+
+```{r PersonalThickets, message = F, echo= TRUE, cache = TRUE}
+PersonalThicket <- function(commsDF){
+  # find communities of patents that are significantly held by one
+  # company if the community contains at least one cleantech patent.  
+  # 
+  # Args:
+  # commsDF: a data frame of patent community attributes produced with 
+#  # GetCommunityAttributes().
+  
+  max.share <- commsDF$max.portfolio/ commsDF$num.pats
+  l1 <- commsDF$num.pats > 3
+  l2 <- commsDF$num.cleantech >= 1
+  l3 <- max.share >= 1/2
+  of.worry <- commsDF[l1&l2&l3,]
+  print(summarise(of.worry, 
+                  min.conductivity = min(conductance),
+                  max.conductivity = max(conductance),
+                  med.conductivity = median(conductance),
+                  num.comms = length(unique(comm)),
+                  med.num.corps = median(num.corps),
+                  med.num.pats = median(num.pats),
+                  med.max.portfolio = median(max.portfolio)))
+  # print(of.worry[order(of.worry$num.cleantech),c(2,3,7:9)])
+}
+
+for (gPats in c("solarCurrent",
+                # "nukeCurrent",
+                "windCurrent",
+                "bioCurrent",
+                "hydroCurrent",
+                "geoCurrent")){
+  g <- get(gPats)
+  print(gPats)
+  c <- label.propagation.community(as.undirected(g))
+  commsDF <- GetCommunityAttributes(g, c)
+  PersonalThicket(commsDF)
+}
+```
+```{r RuleOfThumbCorps, cache = TRUE}
+RuleOfThumb <- function(gCorps){
+  # filter down to most dangerous groups of corporations.  Half a
+  # community belonging to one company is chosen arbitrarily.  
+  # Such a level of concentration is extreme for larger patent
+  # communities, and so selects for smaller ones.
+  # 
+  # Args:
+  # gCorps: a directed netowrk of citations between corporate portfolios
+  
+  df <- get.data.frame(gCorps, "vertices")
+  # logical vectors with which to filter the communities
+  l1 <- df$cleanHoldings >= 1
+  l2 <- df$selfCites >= 5
+  l3 <- df$frag >= .5
+  l4 <- df$holdings >=5
+  g <- induced.subgraph(gCorps, which(l1&l2&l3&l4))
+  return(g)
+}
+for (gCorpsString in c("solarCurrentCorps", "nukeCurrentCorps",
+                       "windCurrentCorps", "bioCurrentCorps",
+                       "hydroCurrentCorps","geoCurrentCorps"
+                       )){
+  print(gCorpsString)
+  g <- get(gCorpsString)
+  of.worry <- RuleOfThumb(g)
+  # print(of.worry)
+  components <- clusters(of.worry, mode = "strong")
+  print(paste(as.character(length(which(components$csize == 1))),
+              "singletons")) 
+  for (group in unique(components$membership)){
+    print('--------------------------------')
+#     print(paste("Strongly connected component size:",
+#                 as.character(components$csize[group])))
+    print(V(of.worry)$name[components$membership == group])
+  }
+  print('###################################')
+#   comms <- label.propagation.community(as.undirected(of.worry))
+#   for (group in unique(comms$membership)){
+#     print('--------------------------------')
+#     print(V(of.worry)$name[comms$membership == group])
+#   }
+#   print('###################################')
+#   
+}
+```
+```{r gephimemo, message=FALSE, echo=FALSE}
+GephiExportCorps <- function(g, fileStringEdgelist, fileStringNodeAttrs){
+  e <- as.data.frame(get.edgelist(g))
+  names(e) <- c("Source","Target")
+  e$Weight <- E(g)$weight
+  write.table(e, fileStringEdgelist, sep = '\t', row.names = F)
+  a <- as.data.frame(vertex.attributes(g), stringsAsFactors = F)
+  a[is.na(a)] <- 0 # replaces all missing values with 0.  Assuming that there are fewer self-citations/fraction of self-citations makes the degree to which we find self-citaitons more signifiant 
+  names(a)[1] <- "ID"
+  # if the graph is weighted, then it's a corporate relations graph and so
+  # should have a membership variable exported with it
+  if (is.weighted(g)){
+    temp <- FindCorpComms(g)
+    a$comm <- temp$membership
+  }
+  write.table(a, fileStringNodeAttrs, sep = '\t',
+              row.names = F,
+              col.names = T)
+}
+
+```
+```{r finallyCorps, message=FALSE, echo=FALSE}
+# GephiExportCorps(windProCorps,"windCorporateRelationsEdges.tsv",
+#                  "windCorporateRelationsNodes.tsv")
+# GephiExportCorps(solarProCorps,"solarCorporateRelationsEdges.tsv",
+#                  "solarCorporateRelationsNodes.tsv")
+# GephiExportCorps(hydroProCorps,"hydroCorporateRelationsEdges.tsv",
+#                  "hydroCorporateRelationsNodes.tsv")
+# GephiExportCorps(nukeProCorps,"nukeCorporateRelationsEdges.tsv",
+#                  "nukeCorporateRelationsNodes.tsv")
+# GephiExportCorps(geoProCorps,"geoCorporateRelationsEdges.tsv",
+#                  "geoCorporateRelationsNodes.tsv")
+# GephiExportCorps(bioProCorps,"bioCorporateRelationsEdges.tsv",
+#                  "bioCorporateRelationsNodes.tsv")
+
+# mod
+#     Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#  0.8324  0.8360  0.8370  0.8374  0.8390  0.8449 
+# nComms 
+#  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 14700   14780   14790   14790   14810   14850 
+
+# 
+# #multilevel.community
+# # initiate start with one community partitioning, then compare the resulting spread of modularities and number of produced communities
+# system.time(biggestMod2 <- multilevel.community(up10))
+# mod2 <- c()
+# nComms2 <- c()
+# system.time(for (i in c(1:100)){
+#   cTemp <- multilevel.community(up10)
+#   mod2 <- c(mod, cTemp$modularity[length(cTemp$modularity)])
+#   nComms2 <- c(nComms2, length(unique(cTemp$membership)))
+#   if (cTemp$modularity > biggestMod2$modularity[
+#     length(
+#       biggestMod2$modularity
+#       )
+#     ]){
+#     biggestMod2 <- cTemp
+#   }
+# }
+# )
+# summary(mod2)
+# #    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# #  0.7517  0.8360  0.8372  0.8393  0.8392  0.9181 
+# summary(ncomms2)
+# #  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# #   11910   11910   11910   11910   11910   11910 
+# 
+# # multilevel.community consistently produces better partitions with higher modularity, and so I will use that.  
+```
+
+
+
